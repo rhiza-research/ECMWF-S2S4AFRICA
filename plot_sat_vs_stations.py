@@ -8,6 +8,9 @@ from matplotlib.colors import LinearSegmentedColormap, BoundaryNorm
 
 import xarray as xr
 import pandas as pd
+import numpy as np
+from scipy.spatial import Voronoi
+from shapely.geometry import Polygon, Point
 
 from sheerwater.utils import roll_and_agg
 from sheerwater.spatial_subdivisions import polygon_subdivision_geodataframe
@@ -29,6 +32,37 @@ parser.add_argument("--agg", type=str,
                     default="weekly,dekadal",
                     help="Aggregation period for plotting: 'dekadal' or 'weekly' (default: dekadal)")
 args = parser.parse_args()
+
+
+def voronoi_bubbles(ax, lon, lat, values, cmap, norm, max_radius):
+    points = np.column_stack([lon, lat])
+    vor = Voronoi(points)
+
+    for i, point in enumerate(points):
+        region_idx = vor.point_region[i]
+        region = vor.regions[region_idx]
+
+        if -1 in region or len(region) == 0:
+            continue
+
+        # voroni polygon
+        poly_coords = [vor.vertices[j] for j in region]
+        vor_poly = Polygon(poly_coords)
+        # bounding circle
+        circle = Point(point).buffer(max_radius)
+        # intersection of voroni and circle bound
+        clipped = vor_poly.intersection(circle)
+
+        if clipped.is_empty:
+            continue
+
+        x, y = clipped.exterior.xy
+        ax.fill(
+            x, y,
+            color=cmap(norm(values[i])),
+            edgecolor="none"
+        )
+
 
 if __name__ == "__main__":
     now_dt = datetime.now().date()
@@ -116,12 +150,14 @@ if __name__ == "__main__":
                     ax_top = top_axes[i]
                     try:
                         vals_tahmo = ds_agg.sel(time=t_idx).precip
-                        sc = ax_top.scatter(
-                            ds_agg.lon, ds_agg.lat,
-                            c=vals_tahmo.values,
-                            cmap=cmap,
-                            norm=norm,
-                            s=30,
+                        voronoi_bubbles(
+                            ax_top,
+                            ds_agg.lon.values,
+                            ds_agg.lat.values,
+                            vals_tahmo.values,
+                            cmap,
+                            norm,
+                            max_radius=0.25
                         )
                         ax_top.set_title(f"TAHMO: {times[i]}\nto {end_times[i]}", fontsize=9)
                     except (KeyError, AttributeError):
@@ -155,10 +191,8 @@ if __name__ == "__main__":
                         ax_bottom.tick_params(left=False, labelleft=False)
                     else:
                         ax_bottom.set_ylabel("lat")
-
                 fig.colorbar(sc, ax=top_axes, label='TAHMO Precipitation (mm)', shrink=0.6, fraction=0.02, pad=0.02)
                 fig.colorbar(im, ax=bottom_axes, label=f'{satellite.upper()} Precipitation (mm)', shrink=0.6, fraction=0.02, pad=0.02)
-
                 dir = f"private_plots/{country}/{live_time}"
                 os.makedirs(dir, exist_ok=True)
                 plt.savefig(f"{dir}/{agg}_{satellite}_vs_stations_{country}.png", bbox_inches='tight', dpi=150)
